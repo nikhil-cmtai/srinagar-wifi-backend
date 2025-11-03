@@ -413,7 +413,11 @@ export const updateUserOtp = async (req, res) => {
     }
 };
 
-// Signup - Create user with device info and send OTP
+// Temporary storage for signup data (until OTP verification)
+// In production, consider using Redis with expiry
+const signupDataStorage = new Map();
+
+// Signup - Send OTP only (DO NOT create user until OTP is verified)
 export const signup = async (req, res) => {
     try {
         const {
@@ -451,51 +455,29 @@ export const signup = async (req, res) => {
             }
         }
 
-        // Check if user already exists
-        let user = await User.findOne({ phone: formattedPhone });
-
-        if (!user) {
-            // Create new user if doesn't exist
-            user = await User.create({
-                name: name || 'User',
-                email: email || `${formattedPhone}@example.com`,
-                phone: formattedPhone,
-                deviceId: deviceId || deviceMacAddress,
-                deviceType: deviceType || 'unknown',
-                deviceModel: deviceModel || 'unknown',
-                deviceOs: deviceOs || 'unknown',
-                deviceOsVersion: deviceOsVersion || 'unknown',
-                deviceBrowser: deviceBrowser || 'unknown',
-                deviceBrowserVersion: deviceBrowserVersion || 'unknown',
-                deviceIp,
-                deviceMacAddress,
-                acceptedTerms: acceptedTerms || false,
-                marketingOptIn: marketingOptIn || false
-            });
-        } else {
-            // Update device info if user exists
-            user.deviceId = deviceId || user.deviceId;
-            user.deviceIp = deviceIp;
-            user.deviceMacAddress = deviceMacAddress;
-            user.deviceType = deviceType || user.deviceType;
-            user.deviceModel = deviceModel || user.deviceModel;
-            user.deviceOs = deviceOs || user.deviceOs;
-            user.deviceBrowser = deviceBrowser || user.deviceBrowser;
-            if (name) user.name = name;
-            if (email) user.email = email;
-            await user.save();
+        // Check if user already exists and is verified
+        const existingUser = await User.findOne({ phone: formattedPhone });
+        
+        if (existingUser) {
+            // If user exists and is verified, they should use login
+            if (existingUser.isVerified) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'User already exists. Please use login endpoint.'
+                });
+            }
+            
+            // If user exists but not verified, check if blocked
+            if (existingUser.isBlocked) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'User account is blocked',
+                    blockReason: existingUser.blockReason
+                });
+            }
         }
 
-        // Check if user is blocked
-        if (user.isBlocked) {
-            return res.status(403).json({
-                success: false,
-                message: 'User account is blocked',
-                blockReason: user.blockReason
-            });
-        }
-
-        // Send OTP
+        // Import and send OTP via Twilio WhatsApp service
         const { sendOtp } = await import('../services/twilloService.js');
         const otpResult = await sendOtp(formattedPhone);
 
@@ -503,33 +485,46 @@ export const signup = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: 'Failed to send OTP',
-                error: otpResult.message
+                error: otpResult.message || 'OTP service error'
             });
         }
 
-        // Update user OTP info
-        user.lastOtp = otpResult.otp; // Remove this in production
-        user.otpRequestedAt = new Date();
-        user.otpAttempts = 0;
-        await user.save();
+        // Store signup data temporarily (will be used after OTP verification)
+        const signupData = {
+            name: name || 'User',
+            email: email || `${formattedPhone}@example.com`,
+            phone: formattedPhone,
+            deviceId: deviceId || deviceMacAddress,
+            deviceType: deviceType || 'unknown',
+            deviceModel: deviceModel || 'unknown',
+            deviceOs: deviceOs || 'unknown',
+            deviceOsVersion: deviceOsVersion || 'unknown',
+            deviceBrowser: deviceBrowser || 'unknown',
+            deviceBrowserVersion: deviceBrowserVersion || 'unknown',
+            deviceIp,
+            deviceMacAddress,
+            acceptedTerms: acceptedTerms || false,
+            marketingOptIn: marketingOptIn || false,
+            otpSentAt: new Date()
+        };
+
+        // Store signup data with expiry (10 minutes same as OTP)
+        const otpExpiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 10;
+        signupDataStorage.set(formattedPhone, signupData);
+        
+        // Auto-delete after expiry
+        setTimeout(() => {
+            signupDataStorage.delete(formattedPhone);
+        }, otpExpiryMinutes * 60 * 1000);
 
         res.status(200).json({
             success: true,
-            message: 'OTP sent successfully to your WhatsApp',
-            userId: user._id,
+            message: 'OTP sent successfully to your WhatsApp. Please verify OTP to complete signup.',
             phone: formattedPhone,
             otpSent: true
             // Don't send OTP in response for security
         });
     } catch (error) {
-        if (error.code === 11000) {
-            const field = Object.keys(error.keyPattern)[0];
-            return res.status(409).json({
-                success: false,
-                message: `${field} already exists`,
-                error: error.message
-            });
-        }
         res.status(500).json({
             success: false,
             message: 'Error during signup',
@@ -538,7 +533,7 @@ export const signup = async (req, res) => {
     }
 };
 
-// Login - Verify OTP and authenticate user
+// Login - Verify OTP and create/authenticate user
 export const login = async (req, res) => {
     try {
         const { phone, otp, deviceIp, deviceMacAddress } = req.body;
@@ -548,6 +543,15 @@ export const login = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: 'Phone number and OTP are required'
+            });
+        }
+
+        // Validate OTP format (6 digits)
+        const otpString = String(otp).trim();
+        if (!/^\d{6}$/.test(otpString)) {
+            return res.status(400).json({
+                success: false,
+                message: 'OTP must be a 6-digit number'
             });
         }
 
@@ -561,73 +565,124 @@ export const login = async (req, res) => {
             }
         }
 
-        // Find user
-        const user = await User.findOne({ phone: formattedPhone });
-
-        if (!user) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found. Please signup first.'
-            });
-        }
-
-        // Check if user is blocked
-        if (user.isBlocked) {
-            return res.status(403).json({
-                success: false,
-                message: 'User account is blocked',
-                blockReason: user.blockReason
-            });
-        }
-
-        // Verify OTP
+        // Import and verify OTP using Twilio service
         const { verifyOtp } = await import('../services/twilloService.js');
-        const verifyResult = await Promise.resolve(verifyOtp(formattedPhone, otp));
+        const verifyResult = verifyOtp(formattedPhone, otpString);
 
         if (!verifyResult.success) {
-            // Increment OTP attempts
-            user.otpAttempts = (user.otpAttempts || 0) + 1;
-            await user.save();
-
             return res.status(400).json({
                 success: false,
-                message: verifyResult.message || 'Invalid OTP',
-                attemptsRemaining: Math.max(0, 3 - user.otpAttempts)
+                message: verifyResult.message || 'Invalid OTP'
             });
         }
 
-        // Update user on successful verification
-        user.isVerified = true;
-        user.otpAttempts = 0;
-        user.lastLogin = new Date();
-        user.lastConnectionTime = new Date();
-        
-        // Update device info if provided
-        if (deviceIp) user.deviceIp = deviceIp;
-        if (deviceMacAddress) user.deviceMacAddress = deviceMacAddress;
+        // OTP verified successfully - Now check if user exists
+        let user = await User.findOne({ phone: formattedPhone });
 
-        // Clear OTP data
-        user.lastOtp = null;
-        user.otpRequestedAt = null;
+        if (!user) {
+            // User doesn't exist - Get signup data from temporary storage
+            const signupData = signupDataStorage.get(formattedPhone);
 
-        await user.save();
-
-        res.status(200).json({
-            success: true,
-            message: 'Login successful',
-            user: {
-                id: user._id,
-                name: user.name,
-                email: user.email,
-                phone: user.phone,
-                isVerified: user.isVerified,
-                plan: user.plan,
-                planStartTime: user.planStartTime,
-                planExpiryTime: user.planExpiryTime,
-                isSessionActive: user.isSessionActive
+            if (!signupData) {
+                // Signup data expired or not found
+                signupDataStorage.delete(formattedPhone);
+                return res.status(400).json({
+                    success: false,
+                    message: 'Signup data expired. Please signup again and verify OTP within the expiry time.'
+                });
             }
-        });
+
+            // Create user after OTP verification
+            user = await User.create({
+                name: signupData.name,
+                email: signupData.email,
+                phone: signupData.phone,
+                deviceId: signupData.deviceId,
+                deviceType: signupData.deviceType,
+                deviceModel: signupData.deviceModel,
+                deviceOs: signupData.deviceOs,
+                deviceOsVersion: signupData.deviceOsVersion,
+                deviceBrowser: signupData.deviceBrowser,
+                deviceBrowserVersion: signupData.deviceBrowserVersion,
+                deviceIp: deviceIp || signupData.deviceIp,
+                deviceMacAddress: deviceMacAddress || signupData.deviceMacAddress,
+                acceptedTerms: signupData.acceptedTerms,
+                marketingOptIn: signupData.marketingOptIn,
+                isVerified: true, // User is verified since OTP is verified
+                lastLogin: new Date(),
+                lastConnectionTime: new Date()
+            });
+
+            // Clear signup data from temporary storage
+            signupDataStorage.delete(formattedPhone);
+
+            res.status(201).json({
+                success: true,
+                message: 'Signup completed successfully. OTP verified and user created.',
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    phone: user.phone,
+                    isVerified: user.isVerified,
+                    plan: user.plan,
+                    planStartTime: user.planStartTime,
+                    planExpiryTime: user.planExpiryTime,
+                    isSessionActive: user.isSessionActive,
+                    lastLogin: user.lastLogin
+                }
+            });
+        } else {
+            // User exists - Check if blocked
+            if (user.isBlocked) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'User account is blocked',
+                    blockReason: user.blockReason
+                });
+            }
+
+            // Update existing user on successful verification
+            user.isVerified = true;
+            user.lastLogin = new Date();
+            user.lastConnectionTime = new Date();
+            
+            // Update device info if provided
+            if (deviceIp) user.deviceIp = deviceIp;
+            if (deviceMacAddress) user.deviceMacAddress = deviceMacAddress;
+
+            // Save user to database with all updates
+            await user.save();
+
+            // Populate plan info for response
+            await user.populate('plan');
+
+            res.status(200).json({
+                success: true,
+                message: 'Login successful. OTP verified and user authenticated.',
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    phone: user.phone,
+                    isVerified: user.isVerified,
+                    plan: user.plan,
+                    planStartTime: user.planStartTime,
+                    planExpiryTime: user.planExpiryTime,
+                    isSessionActive: user.isSessionActive,
+                    lastLogin: user.lastLogin
+                }
+            });
+        }
     } catch (error) {
+        if (error.code === 11000) {
+            const field = Object.keys(error.keyPattern)[0];
+            return res.status(409).json({
+                success: false,
+                message: `${field} already exists`,
+                error: error.message
+            });
+        }
         res.status(500).json({
             success: false,
             message: 'Error during login',
