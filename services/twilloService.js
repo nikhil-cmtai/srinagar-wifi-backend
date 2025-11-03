@@ -6,17 +6,17 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const otpStorage = new Map();
 
 /**
- * 6 digit OTP generate karna
- * @returns {string} 6 digit OTP
+ * Generate a 6-digit OTP
+ * @returns {string} 6-digit OTP
  */
 export const generateOtp = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
 /**
- * 6 digit OTP bhejna hai WhatsApp pe
- * @param {string} mobileNumber - International format number (e.g. +919876543210)
- * @returns {Promise<Object>} Twilio ka response
+ * Send 6-digit OTP via WhatsApp
+ * @param {string} mobileNumber - Mobile number in international format (e.g., +919876543210)
+ * @returns {Promise<Object>} Twilio response object
  */
 export const sendOtp = async (mobileNumber) => {
     try {
@@ -24,13 +24,13 @@ export const sendOtp = async (mobileNumber) => {
         const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 10;
         const expiryTime = Date.now() + expiryMinutes * 60 * 1000;
 
-        // WhatsApp number format
+        // Format numbers for WhatsApp
         const whatsappFrom = process.env.TWILIO_WHATSAPP_NUMBER
             ? `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`
             : `whatsapp:${process.env.TWILIO_PHONE_NUMBER}`;
         const whatsappTo = `whatsapp:${mobileNumber}`;
 
-        const message = `Aapka Srinagar Airport WiFi OTP hai: *${otp}* . Yeh ${expiryMinutes} minute tak valid hai.`;
+        const message = `Your Srinagar Airport WiFi OTP is: *${otp}*. This OTP is valid for ${expiryMinutes} minutes.`;
 
         const response = await twilioClient.messages.create({
             body: message,
@@ -52,24 +52,24 @@ export const sendOtp = async (mobileNumber) => {
             success: true,
             messageSid: response.sid,
             status: response.status,
-            otp: otp, // (aap isko remove kar sakte ho production me)
-            message: "OTP WhatsApp pe bhej diya gaya hai"
+            otp: otp, // Remove this in production for security
+            message: "OTP sent successfully via WhatsApp"
         };
     } catch (error) {
-        console.error('OTP bhejne me error:', error);
+        console.error('Error sending OTP:', error);
         return {
             success: false,
             error: error.message,
-            message: "OTP bheja nahi gaya"
+            message: "Failed to send OTP"
         };
     }
 };
 
 /**
- * 6 digit OTP verify karna hai
- * @param {string} mobileNumber - International format number (e.g. +919876543210)
- * @param {string} otp - User ka dala hua OTP
- * @returns {Object}
+ * Verify 6-digit OTP
+ * @param {string} mobileNumber - Mobile number in international format (e.g., +919876543210)
+ * @param {string} otp - OTP entered by user
+ * @returns {Object} Verification result
  */
 export const verifyOtp = (mobileNumber, otp) => {
     try {
@@ -78,7 +78,7 @@ export const verifyOtp = (mobileNumber, otp) => {
         if (!stored) {
             return {
                 success: false,
-                message: 'OTP expired ya galat. Naya OTP mangwao.'
+                message: 'OTP not found or expired. Please request a new OTP.'
             };
         }
 
@@ -86,7 +86,7 @@ export const verifyOtp = (mobileNumber, otp) => {
             otpStorage.delete(mobileNumber);
             return {
                 success: false,
-                message: 'OTP expire ho gaya. Naya OTP mangwao.'
+                message: 'OTP has expired. Please request a new OTP.'
             };
         }
 
@@ -95,7 +95,7 @@ export const verifyOtp = (mobileNumber, otp) => {
             otpStorage.delete(mobileNumber);
             return {
                 success: false,
-                message: 'Maksimum attempts cross ho gaye. Naya OTP mangwao.'
+                message: 'Maximum verification attempts exceeded. Please request a new OTP.'
             };
         }
 
@@ -105,22 +105,22 @@ export const verifyOtp = (mobileNumber, otp) => {
             otpStorage.delete(mobileNumber);
             return {
                 success: true,
-                message: 'OTP sahi hai, verify ho gaya.'
+                message: 'OTP verified successfully'
             };
         } else {
             otpStorage.set(mobileNumber, stored);
             const remaining = maxAttempts - stored.attempts;
             return {
                 success: false,
-                message: `OTP galat hai. ${remaining > 0 ? `${remaining} attempt(s) bache hai.` : 'Naya OTP mangwao.'}`
+                message: `Invalid OTP. ${remaining > 0 ? `${remaining} attempt(s) remaining.` : 'Please request a new OTP.'}`
             };
         }
     } catch (error) {
-        console.error('OTP verify karte waqt error:', error);
+        console.error('Error verifying OTP:', error);
         return {
             success: false,
             error: error.message,
-            message: 'OTP verify nahi hua'
+            message: 'Failed to verify OTP'
         };
     }
 };
