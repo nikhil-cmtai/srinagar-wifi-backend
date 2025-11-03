@@ -42,7 +42,7 @@ export const sendOtp = async (mobileNumber) => {
         const expiryMinutes = parseInt(process.env.OTP_EXPIRY_MINUTES) || 10;
         const expiryTime = Date.now() + expiryMinutes * 60 * 1000;
 
-        // Format numbers for WhatsApp
+        // Format numbers - just use the number without whatsapp: prefix
         let whatsappFrom = process.env.TWILIO_WHATSAPP_NUMBER
             ? process.env.TWILIO_WHATSAPP_NUMBER
             : process.env.TWILIO_PHONE_NUMBER;
@@ -52,9 +52,8 @@ export const sendOtp = async (mobileNumber) => {
             throw new Error('Twilio WhatsApp number is not configured. Please set TWILIO_WHATSAPP_NUMBER or TWILIO_PHONE_NUMBER in .env file.');
         }
 
-        // Remove any existing whatsapp: prefix and add it properly
-        whatsappFrom = whatsappFrom.replace(/^whatsapp:/, '');
-        whatsappFrom = `whatsapp:${whatsappFrom}`;
+        // Remove any whatsapp: prefix if present - use only the number
+        whatsappFrom = String(whatsappFrom).replace(/^whatsapp:/, '').trim();
 
         // Ensure mobile number is a string and has + prefix
         let formattedMobile = String(mobileNumber).trim().replace(/\s/g, ''); // Convert to string and remove spaces
@@ -67,21 +66,23 @@ export const sendOtp = async (mobileNumber) => {
                 formattedMobile = `+${formattedMobile}`;
             }
         }
-        const whatsappTo = `whatsapp:${formattedMobile}`;
-
-        const message = `Your Srinagar Airport WiFi OTP is: *${otp}*. This OTP is valid for ${expiryMinutes} minutes.`;
+        // Use only the number, no whatsapp: prefix
+        const whatsappTo = formattedMobile;
 
         // Get Twilio client (with validation)
         const client = getTwilioClient();
 
-        // Log the numbers being used (for debugging - remove in production)
-        console.log('Sending WhatsApp from:', whatsappFrom);
-        console.log('Sending WhatsApp to:', whatsappTo);
+        // WhatsApp Template SID
+        const whatsappTemplateSid = process.env.WHATSAPP_TEMPLATE_SID || 'HX088a7c7fbd13485fce1ddcd9086e431b';
 
+        // Send message using WhatsApp Template
         const response = await client.messages.create({
-            body: message,
-            from: whatsappFrom,
-            to: whatsappTo
+            contentSid: whatsappTemplateSid,
+            from: "whatsapp:" + whatsappFrom,
+            to: "whatsapp:" + whatsappTo,
+            contentVariables: JSON.stringify({
+                "1": otp // Template variable for OTP (adjust variable name based on your template)
+            })
         });
 
         // Store OTP using formatted mobile number (consistent key for verification)
@@ -103,8 +104,6 @@ export const sendOtp = async (mobileNumber) => {
             message: "OTP sent successfully via WhatsApp"
         };
     } catch (error) {
-        console.error('Error sending OTP:', error);
-        
         // Provide helpful error messages for common issues
         let errorMessage = "Failed to send OTP";
         
@@ -191,7 +190,6 @@ export const verifyOtp = (mobileNumber, otp) => {
             };
         }
     } catch (error) {
-        console.error('Error verifying OTP:', error);
         return {
             success: false,
             error: error.message,
